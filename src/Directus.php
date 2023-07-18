@@ -15,25 +15,64 @@ namespace Slations\DirectusSdk;
  */
 class Directus
 {
-    public $base_url;
-    public $auth_token = false;
-    private $auth_prefix;
-    private $auth_domain;
-    private $auth_storage;
-    private $strip_headers;
+    private string $base_url;
+    private string $auth_token = "";
+    private string $auth_prefix;
+    private string $auth_domain;
+    private string $auth_storage;
+    private bool $strip_headers;
+    private CurlHandle $curl_ch;
 
-    // Construct Function
-    public function __construct($base_url, $auth_prefix, $auth_storage = '_SESSION', $auth_domain = '/', $strip_headers = true)
+    /***
+     * Construct Function
+     * @param string $base_url Set API URL
+     * @param string $auth_prefix Set Auth Prefix
+     * @param string $auth_storage Set Auth Storage
+     * @param string $auth_domain Set Auth Domain
+     * @param true $strip_headers Set Strip Headers
+     * @param bool $curl_tcp_fastopen
+     * @param bool $curl_encoding
+     * @param bool $curl_verify_ssl
+     * @param bool $curl_only_ip4
+     * @throws Exception
+     */
+    public function __construct(string $base_url, string $auth_prefix, string $auth_storage = '_SESSION',
+                                string $auth_domain = '/', bool $strip_headers = true,
+                                bool $curl_tcp_fastopen = true, bool $curl_encoding = true,
+                                bool $curl_verify_ssl = true, bool $curl_only_ip4 = false)
     {
+        if (mb_strlen($auth_prefix) < 1) {
+            throw new Exception("You need to specify the authorization prefix.");
+        }
         $this->base_url = rtrim($base_url, '/');
         $this->auth_storage = $auth_storage;
         $this->strip_headers = $strip_headers;
         $this->auth_domain = $auth_domain;
         $this->auth_prefix = $auth_prefix;
+        //
+        $this->curl_ch = curl_init();
+        if ($curl_encoding) {
+            curl_setopt($this->curl_ch, CURLOPT_ENCODING,  '');
+        }
+        if ($curl_tcp_fastopen) {
+            curl_setopt($this->curl_ch, CURLOPT_TCP_FASTOPEN, true);
+        }
+        if (!$curl_verify_ssl) {
+            curl_setopt($this->curl_ch, CURLOPT_SSL_VERIFYPEER, 0);
+            curl_setopt($this->curl_ch, CURLOPT_SSL_VERIFYHOST, 0);
+            curl_setopt($this->curl_ch, CURLOPT_SSL_VERIFYSTATUS, 0);
+        }
+        if ($curl_only_ip4) {
+            curl_setopt($this->curl_ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
+        }
+        //
+        register_shutdown_function( function () {
+            curl_close($this->curl_ch);
+        });
     }
 
     // Value Storage
-    private function set_value($key, $value)
+    private function set_value($key, $value): void
     {
         $_SESSION[$this->auth_prefix . $key] = $value;
         if ($this->auth_storage === '_COOKIE'):
@@ -46,7 +85,7 @@ class Directus
         return $_SESSION[$this->auth_prefix . $key] ?? null;
     }
 
-    private function unset_value($key)
+    private function unset_value($key): void
     {
         unset($_SESSION[$this->auth_prefix . $key]);
         if ($this->auth_storage === '_COOKIE'):
@@ -59,15 +98,15 @@ class Directus
     {
         if (($this->auth_storage === '_SESSION' || $this->auth_storage === '_COOKIE') && $this->get_value('directus_refresh') != NULL):
             if ($this->get_value('directus_access_expires') < time()):
-                $refresh = curl_init($this->base_url . '/auth/refresh');
-                curl_setopt($refresh, CURLOPT_POST, 1);
-                curl_setopt($refresh, CURLOPT_POSTFIELDS, json_encode(array("refresh_token" => $this->get_value('directus_refresh'))));
-                curl_setopt($refresh, CURLOPT_RETURNTRANSFER, 1);
-                curl_setopt($refresh, CURLOPT_HTTPHEADER, array('Content-Type: application/json'));
-                $response = curl_exec($refresh);
-                $httpcode = curl_getinfo($refresh, CURLINFO_HTTP_CODE);
-                curl_close($refresh);
-                if ($httpcode == 200):
+                curl_setopt($this->curl_ch, CURLOPT_URL, $this->base_url . '/auth/refresh');
+                curl_setopt($this->curl_ch, CURLOPT_POST, 1);
+                curl_setopt($this->curl_ch, CURLOPT_POSTFIELDS, json_encode(array("refresh_token" => $this->get_value('directus_refresh'))));
+                curl_setopt($this->curl_ch, CURLOPT_RETURNTRANSFER, 1);
+                curl_setopt($this->curl_ch, CURLOPT_HTTPHEADER, array('Content-Type: application/json'));
+                $response = curl_exec($this->curl_ch);
+                $http_code = curl_getinfo($this->curl_ch, CURLINFO_HTTP_CODE);
+                $GLOBALS['curl_info'][] = curl_getinfo($this->curl_ch);
+                if ($http_code == 200):
                     $response = json_decode($response, true);
                     $this->set_value('directus_refresh', $response['data']['refresh_token']);
                     $this->set_value('directus_access', $response['data']['access_token']);
@@ -90,40 +129,36 @@ class Directus
 
     private function strip_headers($response)
     {
-        if ($this->strip_headers === false):
-            return $response;
-        else:
-            unset($response['headers']);
-            return $response;
+        if ($this->strip_headers !== false):
+        unset($response['headers']);
         endif;
+        return $response;
     }
 
     private function make_call($request, $data = false, $method = 'GET', $bypass = false)
     {
-        $request = $this->base_url . $request; // add the base url to the requested uri
+        $request = $this->base_url . $request; // add the base url to the requested uri.
         $auth_token = $this->auth_token;
-
-        $curl = curl_init(); // creates the curl
         $headers = array();
 
         switch ($method) {
             case "POST":
-                curl_setopt($curl, CURLOPT_POST, 1);
-                array_push($headers, "Content-Type: application/json");
+                curl_setopt($this->curl_ch, CURLOPT_POST, 1);
+                $headers[] = "Content-Type: application/json";
                 if ($data)
-                    curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($data));
+                    curl_setopt($this->curl_ch, CURLOPT_POSTFIELDS, json_encode($data));
                 break;
             case "DELETE":
-                curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "DELETE");
-                array_push($headers, "Content-Type: application/json");
+                curl_setopt($this->curl_ch, CURLOPT_CUSTOMREQUEST, "DELETE");
+                $headers[] = "Content-Type: application/json";
                 if ($data)
-                    curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($data));
+                    curl_setopt($this->curl_ch, CURLOPT_POSTFIELDS, json_encode($data));
                 break;
             case "PATCH":
-                curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "PATCH");
-                array_push($headers, "Content-Type: application/json");
+                curl_setopt($this->curl_ch, CURLOPT_CUSTOMREQUEST, "PATCH");
+                $headers[] = "Content-Type: application/json";
                 if ($data)
-                    curl_setopt($curl, CURLOPT_POSTFIELDS, json_encode($data));
+                    curl_setopt($this->curl_ch, CURLOPT_POSTFIELDS, json_encode($data));
                 break;
             case "POST_MULTIPART":
                 $fields = array("storage" => $data["storage"], "download_filename" => $data["file"]["name"]);
@@ -145,54 +180,82 @@ class Directus
                 // Include File
                 $post_data .= "--" . $delimiter . $eol . 'Content-Disposition: form-data; name="'
                     . $data["file"]["name"] . '"; filename="' . $data["file"]["name"] . '"' . $eol
-                    . 'Content-Type: ' . mime_content_type($data["file"]['tmp_name']) . $eol
+                    . 'Content-Type: ' . mime_content_type($_FILES["file"]['tmp_name']) . $eol
                     . 'Content-Transfer-Encoding: binary' . $eol;
                 $post_data .= $eol;
                 $post_data .= file_get_contents($data["file"]["tmp_name"]) . $eol;
                 $post_data .= "--" . $delimiter . "--" . $eol;
 
-                curl_setopt($curl, CURLOPT_POST, 1);
-                curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "POST");
-                curl_setopt($curl, CURLOPT_POSTFIELDS, $post_data);
-                array_push($headers, "Content-Type: multipart/form-data; boundary=" . $delimiter);
-                array_push($headers, "Content-Length: " . strlen($post_data));
+                curl_setopt($this->curl_ch, CURLOPT_POST, 1);
+                curl_setopt($this->curl_ch, CURLOPT_CUSTOMREQUEST, "POST");
+                curl_setopt($this->curl_ch, CURLOPT_POSTFIELDS, $post_data);
+                $headers[] = "Content-Type: multipart/form-data; boundary=" . $delimiter;
+                $headers[] = "Content-Length: " . strlen($post_data);
                 break;
             default:
-                if ($data)
-                    $request = sprintf("%s?%s", $request, http_build_query($data));
+                if ($data) {
+                    $position = strpos($request, "?");
+                    if($position!==false) {
+                        $request = sprintf("%s&%s", $request, http_build_query($data));
+                    }
+                    else {
+                        $request = sprintf("%s?%s", $request, http_build_query($data));
+                    }
+                }
         }
 
-        if (($auth_token != false || $this->get_value('directus_refresh')) && $bypass == false) {
-            array_push($headers, "Authorization: Bearer " . $this->get_access_token());
+        if (($auth_token || $this->get_value('directus_refresh')) && !$bypass) {
+            $headers[] = "Authorization: Bearer " . $this->get_access_token();
         }
 
-        curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($this->curl_ch, CURLOPT_HTTPHEADER, $headers);
+        curl_setopt($this->curl_ch, CURLOPT_URL, $request);
+        curl_setopt($this->curl_ch, CURLOPT_RETURNTRANSFER, 1);
 
-        curl_setopt($curl, CURLOPT_URL, $request);
-        curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
+        $result = curl_exec($this->curl_ch); // execute the curl
 
-        $result = curl_exec($curl); // execute the curl
+        $http_headers = curl_getinfo($this->curl_ch);
+        $http_error = curl_errno($this->curl_ch);
 
-        $http_headers = curl_getinfo($curl);
-        $http_error = curl_errno($curl);
+        $GLOBALS['curl_info'][] = curl_getinfo($this->curl_ch);
 
-        curl_close($curl);
 
         if ($http_error) {
             $result['errors'] = $http_error;
-            $result['headers'] = $http_headers;
         } else {
             $result = json_decode($result, true);
-            $result['headers'] = $http_headers;
         }
+        $result['headers'] = $http_headers;
 
         return $result;
     }
 
-    // Set Auth Token
-    public function auth_token($token)
+    /**
+     * Get Base URL
+     * @return string
+     */
+    public function get_base_url(): string
+    {
+        return $this->base_url;
+    }
+
+    /**
+     * Set Auth Token
+     * @param $token
+     * @return void
+     */
+    public function auth_token($token): void
     {
         $this->auth_token = $token;
+    }
+
+    /**
+     * Get Auth Token
+     * @return string
+     */
+    public function get_auth_token(): string
+    {
+        return $this->auth_token;
     }
 
     // Items
@@ -235,7 +298,7 @@ class Directus
     {
         $data = array('email' => $email, 'password' => $password);
 
-        if ($otp != false)
+        if ($otp)
             $data['otp'] = $otp;
 
         $response = $this->make_call('/auth/login', $data, 'POST');
@@ -273,7 +336,7 @@ class Directus
     public function auth_password_request($email, $reset_url = false)
     {
         $data = array('email' => $email);
-        if ($reset_url != false)
+        if ($reset_url)
             $data['reset_url'] = $reset_url;
         $response = $this->make_call('/auth/password/request', $data, 'POST');
         if ($response['headers']['http_code'] === 200):
@@ -328,7 +391,7 @@ class Directus
     public function users_invite($email, $role, $invite_url = false)
     {
         $data = array('email' => $email, 'role' => $role);
-        if ($invite_url != false)
+        if ($invite_url)
             $data['invite_url'] = $invite_url;
         $response = $this->make_call('/users/invite', $data, 'POST');
         if ($response['headers']['http_code'] === 200):
@@ -362,6 +425,7 @@ class Directus
         else:
             return $this->strip_headers($this->make_call('/files', false, 'GET'));
         endif;
+
     }
 
     public function files_create($file, $folder = null, $storage = 'local')
@@ -370,7 +434,7 @@ class Directus
         return $this->strip_headers($this->make_call('/files', $data, 'POST_MULTIPART'));
     }
 
-     public function files_update($id, $fields)
+    public function files_update($id, $fields)
     {
         return $this->strip_headers($this->make_call('/files/' . $id, $fields, 'PATCH'));
     }
